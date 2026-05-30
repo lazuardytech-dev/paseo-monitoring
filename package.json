@@ -1,0 +1,29 @@
+{
+  "name": "paseo-monitoring",
+  "version": "0.1.0",
+  "description": "Paseo daemon monitoring dashboard",
+  "main": "server/index.js",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 6004",
+    "build": "vite build",
+    "start": "bun server/index.js",
+    "preview": "vite preview --host 127.0.0.1 --port 6004"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "express": "^5.2.1",
+    "lucide-react": "^1.17.0",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "react-router-dom": "^7.16.0",
+    "sonner": "^2.0.7"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.0.2",
+    "vite": "^8.0.14"
+  },
+  "private": true
+}
