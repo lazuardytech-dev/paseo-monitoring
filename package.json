@@ -5,7 +5,7 @@
   "main": "server/index.js",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 6004",
-    "build": "vite build",
+    "build": "NODE_ENV=production vite build",
     "start": "bun server/index.js",
     "start:collector": "node server/collector.js",
     "start:all": "pm2 start server/collector.js --name paseo-monitoring-collector && pm2 start server/index.js --name paseo-monitoring",
