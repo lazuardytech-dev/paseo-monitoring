@@ -1,0 +1,60 @@
+// PM2 Ecosystem File
+// Usage: pm2 start ecosystem.config.js
+//        pm2 restart ecosystem.config.js --only paseo-monitoring
+
+module.exports = {
+  apps: [
+    {
+      name: "paseo-monitoring",
+      script: "./server/index.js",
+      interpreter: "/root/.bun/bin/bun",
+      instances: 4,
+      exec_mode: "cluster",
+      env: {
+        NODE_ENV: "production",
+        HOST: "127.0.0.1",
+        PORT: "6004",
+        STATE_FILE_PATH: "./data/state.json",
+      },
+      env_file: ".env.production",
+      max_memory_restart: "512M",
+      error_file: "./logs/pm2-error.log",
+      out_file: "./logs/pm2-out.log",
+      log_file: "./logs/pm2-combined.log",
+      log_date_format: "YYYY-MM-DD HH:mm:ss Z",
+      merge_logs: true,
+      max_restarts: 5,
+      restart_delay: 3000,
+      autorestart: true,
+      watch: false,
+      stop_exit_codes: [0],
+      kill_timeout: 15000,
+      listen_timeout: 10000,
+      health_check_url: "http://127.0.0.1:6004/api/health",
+      health_check_interval: 30000,
+      health_check_timeout: 5000,
+    },
+    {
+      name: "paseo-monitoring-collector",
+      script: "./server/collector.js",
+      interpreter: "node",
+      instances: 1,
+      exec_mode: "fork",
+      env: {
+        NODE_ENV: "production",
+      },
+      env_file: ".env.production",
+      max_memory_restart: "128M",
+      error_file: "./logs/pm2-collector-error.log",
+      out_file: "./logs/pm2-collector-out.log",
+      log_date_format: "YYYY-MM-DD HH:mm:ss Z",
+      merge_logs: true,
+      max_restarts: 5,
+      restart_delay: 5000,
+      autorestart: true,
+      watch: false,
+      stop_exit_codes: [0],
+      kill_timeout: 5000,
+    },
+  ],
+};

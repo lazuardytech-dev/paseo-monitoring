@@ -15,9 +15,7 @@ const APP_SHELL_URLS = [
 ];
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(
-    caches.open(APP_SHELL_CACHE).then((cache) => cache.addAll(APP_SHELL_URLS)),
-  );
+  event.waitUntil(caches.open(APP_SHELL_CACHE).then((cache) => cache.addAll(APP_SHELL_URLS)));
   self.skipWaiting();
 });
 
@@ -27,9 +25,7 @@ self.addEventListener("activate", (event) => {
       .keys()
       .then((keys) =>
         Promise.all(
-          keys
-            .filter((key) => key !== APP_SHELL_CACHE && key !== RUNTIME_CACHE)
-            .map((key) => caches.delete(key)),
+          keys.filter((key) => key !== APP_SHELL_CACHE && key !== RUNTIME_CACHE).map((key) => caches.delete(key)),
         ),
       )
       .then(() => self.clients.claim()),
@@ -90,9 +86,7 @@ self.addEventListener("fetch", (event) => {
   }
 
   if (
-    ["style", "script", "image", "font", "manifest"].includes(
-      request.destination,
-    ) ||
+    ["style", "script", "image", "font", "manifest"].includes(request.destination) ||
     url.pathname.startsWith("/assets/")
   ) {
     event.respondWith(cacheFirst(request));
@@ -100,11 +94,13 @@ self.addEventListener("fetch", (event) => {
   }
 
   event.respondWith(
-    fetch(request).catch(() => caches.match(request)).then((response) => {
-      if (response) {
-        return response;
-      }
-      return caches.match("/login");
-    }),
+    fetch(request)
+      .catch(() => caches.match(request))
+      .then((response) => {
+        if (response) {
+          return response;
+        }
+        return caches.match("/login");
+      }),
   );
 });

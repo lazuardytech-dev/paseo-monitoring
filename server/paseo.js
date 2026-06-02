@@ -3,15 +3,33 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 
 const CPU_SAMPLE_INTERVAL_MS = 250;
-const DAEMON_STATUS_TIMEOUT_MS = 45000;
-const DAEMON_RESTART_TIMEOUT_MS = 90000;
+const DAEMON_STATUS_TIMEOUT_MS = process.env.NODE_ENV === "test" ? 1500 : 45000;
+const DAEMON_RESTART_TIMEOUT_MS = process.env.NODE_ENV === "test" ? 5000 : 90000;
 const DAEMON_HEALTHCHECK_ATTEMPTS_NORMAL = 2;
 const DAEMON_HEALTHCHECK_ATTEMPTS_FORCE = 3;
-const DAEMON_HEALTHCHECK_RETRY_DELAY_MS = 3000;
+const DAEMON_HEALTHCHECK_RETRY_DELAY_MS = process.env.NODE_ENV === "test" ? 10 : 3000;
+
+let daemonActionInProgress = false;
+let daemonActionLock = null;
+
+function acquireDaemonActionLock(actionName) {
+  if (daemonActionInProgress) {
+    return false;
+  }
+  daemonActionInProgress = true;
+  daemonActionLock = actionName;
+  return true;
+}
+
+function releaseDaemonActionLock() {
+  daemonActionInProgress = false;
+  daemonActionLock = null;
+}
 
 function execute(command, args, timeout = 20000) {
   return new Promise((resolve, reject) => {
-    execFile(
+    const execFileImpl = globalThis.__PASEO_EXEC_FILE__ || execFile;
+    execFileImpl(
       command,
       args,
       {
@@ -107,7 +125,10 @@ function parseProcessCpuTicks(processStatText) {
     return null;
   }
 
-  const trailingFields = trimmed.slice(lastParenIndex + 1).trim().split(/\s+/);
+  const trailingFields = trimmed
+    .slice(lastParenIndex + 1)
+    .trim()
+    .split(/\s+/);
   if (trailingFields.length < 13) {
     return null;
   }
@@ -194,9 +215,7 @@ async function listProcessTreePids(rootPid) {
 }
 
 async function sampleCpuTicksForPids(pids) {
-  const uniquePids = Array.from(
-    new Set(pids.filter((pid) => Number.isFinite(pid) && pid > 0)),
-  );
+  const uniquePids = Array.from(new Set(pids.filter((pid) => Number.isFinite(pid) && pid > 0)));
   if (uniquePids.length === 0) {
     return null;
   }
@@ -284,10 +303,7 @@ async function getInstantCpuPercent(pids) {
     return null;
   }
 
-  const processDelta = sumProcessTickDelta(
-    firstSample.processTicksByPid,
-    secondSample.processTicksByPid,
-  );
+  const processDelta = sumProcessTickDelta(firstSample.processTicksByPid, secondSample.processTicksByPid);
   const systemDelta = secondSample.systemTicks - firstSample.systemTicks;
   if (processDelta == null || systemDelta <= 0) {
     return null;
@@ -298,19 +314,13 @@ async function getInstantCpuPercent(pids) {
 }
 
 async function getMemoryMetrics(pids) {
-  const uniquePids = Array.from(
-    new Set(pids.filter((pid) => Number.isFinite(pid) && pid > 0)),
-  );
+  const uniquePids = Array.from(new Set(pids.filter((pid) => Number.isFinite(pid) && pid > 0)));
   if (uniquePids.length === 0) {
     return null;
   }
 
   try {
-    const { stdout } = await execute(
-      "ps",
-      ["-o", "pid=,%mem=,rss=", "-p", uniquePids.join(",")],
-      10000,
-    );
+    const { stdout } = await execute("ps", ["-o", "pid=,%mem=,rss=", "-p", uniquePids.join(",")], 10000);
 
     const lines = stdout
       .trim()
@@ -381,10 +391,8 @@ async function getDaemonStatus() {
   let combinedOutput = "";
 
   try {
-    const { stdout, stderr } = await execute(
-      "paseo",
-      ["daemon", "status", "--json"],
-      DAEMON_STATUS_TIMEOUT_MS,
+    const { stdout, stderr } = await callDaemonCli(() =>
+      execute("paseo", ["daemon", "status", "--json"], DAEMON_STATUS_TIMEOUT_MS),
     );
     combinedOutput = `${stdout}\n${stderr}`.trim();
   } catch (error) {
@@ -407,7 +415,8 @@ async function getDaemonStatus() {
   }
 
   const pid = parseNumber(status.pid);
-  const metrics = pid ? await getProcessMetrics(pid) : null;
+  const sampledMetrics = pid ? await getProcessMetrics(pid) : null;
+  const metrics = sampledMetrics || status.metrics || null;
 
   return {
     ok: true,
@@ -451,7 +460,7 @@ async function executeRestartCommand(force = false) {
   }
 
   try {
-    const { stdout, stderr } = await execute("paseo", args, DAEMON_RESTART_TIMEOUT_MS);
+    const { stdout, stderr } = await callDaemonCli(() => execute("paseo", args, DAEMON_RESTART_TIMEOUT_MS));
 
     return {
       step: buildRestartStepLabel(force),
@@ -502,92 +511,170 @@ async function waitForReachableDaemon(attempts) {
 }
 
 async function restartDaemon() {
-  const commandSteps = [];
-  const healthChecks = [];
-
-  const normalRestart = await executeRestartCommand(false);
-  commandSteps.push(normalRestart);
-
-  const normalHealth = await waitForReachableDaemon(DAEMON_HEALTHCHECK_ATTEMPTS_NORMAL);
-  healthChecks.push(...normalHealth.statusChecks);
-
-  if (normalHealth.ok) {
-    return {
-      ok: true,
-      forced: false,
-      output: joinNonEmpty([
-        normalRestart.output,
-        `Daemon recovered after restart: ${summarizeDaemonStatus(normalHealth.daemonStatus)}`,
-      ]),
-      steps: commandSteps,
-      healthChecks,
-      daemonStatus: normalHealth.daemonStatus,
-    };
+  const lockAction = "restart";
+  if (!acquireDaemonActionLock(lockAction)) {
+    return { ok: false, error: `Another daemon action is in progress (${daemonActionLock})` };
   }
 
-  const forceRestart = await executeRestartCommand(true);
-  commandSteps.push(forceRestart);
+  try {
+    const commandSteps = [];
+    const healthChecks = [];
 
-  const forceHealth = await waitForReachableDaemon(DAEMON_HEALTHCHECK_ATTEMPTS_FORCE);
-  healthChecks.push(...forceHealth.statusChecks);
+    const normalRestart = await executeRestartCommand(false);
+    commandSteps.push(normalRestart);
 
-  if (forceHealth.ok) {
+    const normalHealth = await waitForReachableDaemon(DAEMON_HEALTHCHECK_ATTEMPTS_NORMAL);
+    healthChecks.push(...normalHealth.statusChecks);
+
+    if (normalHealth.ok) {
+      console.error(`[restartDaemon] Normal restart output:\n${normalRestart.output}`);
+      return {
+        ok: true,
+        forced: false,
+        output: `Daemon restarted and recovered (normal): ${summarizeDaemonStatus(normalHealth.daemonStatus)}`,
+        daemonStatus: normalHealth.daemonStatus,
+      };
+    }
+
+    const forceRestart = await executeRestartCommand(true);
+    commandSteps.push(forceRestart);
+
+    const forceHealth = await waitForReachableDaemon(DAEMON_HEALTHCHECK_ATTEMPTS_FORCE);
+    healthChecks.push(...forceHealth.statusChecks);
+
+    if (forceHealth.ok) {
+      console.error(`[restartDaemon] Force restart output:\n${normalRestart.output}\n${forceRestart.output}`);
+      return {
+        ok: true,
+        forced: true,
+        output: `Daemon restarted and recovered (force): ${summarizeDaemonStatus(forceHealth.daemonStatus)}`,
+        daemonStatus: forceHealth.daemonStatus,
+      };
+    }
+
+    const finalStatus =
+      forceHealth.statusChecks[forceHealth.statusChecks.length - 1]?.summary ||
+      normalHealth.statusChecks[normalHealth.statusChecks.length - 1]?.summary ||
+      "unknown";
+
+    console.error(
+      `[restartDaemon] All restart attempts failed.\nNormal output:\n${normalRestart.output}\nForce output:\n${forceRestart.output}`,
+    );
     return {
-      ok: true,
-      forced: true,
-      output: joinNonEmpty([
-        normalRestart.output,
-        forceRestart.output,
-        `Daemon recovered after force restart: ${summarizeDaemonStatus(forceHealth.daemonStatus)}`,
-      ]),
-      steps: commandSteps,
-      healthChecks,
-      daemonStatus: forceHealth.daemonStatus,
+      ok: false,
+      error: "Daemon restart failed to recover a reachable daemon",
+      output: `Restart failed. Final daemon status: ${finalStatus}`,
+      daemonStatus: null,
     };
+  } finally {
+    releaseDaemonActionLock();
   }
-
-  const finalStatus =
-    forceHealth.statusChecks[forceHealth.statusChecks.length - 1]?.summary ||
-    normalHealth.statusChecks[normalHealth.statusChecks.length - 1]?.summary ||
-    "unknown";
-
-  return {
-    ok: false,
-    forced: true,
-    error: "Daemon restart failed to recover a reachable daemon",
-    output: joinNonEmpty([
-      normalRestart.output,
-      forceRestart.output,
-      `Final daemon status: ${finalStatus}`,
-    ]),
-    steps: commandSteps,
-    healthChecks,
-  };
 }
 
 async function stopDaemon() {
+  const lockAction = "stop";
+  if (!acquireDaemonActionLock(lockAction)) {
+    return { ok: false, error: `Another daemon action is in progress (${daemonActionLock})` };
+  }
+
   try {
-    const { stdout, stderr } = await execute("paseo", [
-      "daemon",
-      "stop",
-      "--json",
-    ]);
+    const { stdout, stderr } = await callDaemonCli(() => execute("paseo", ["daemon", "stop", "--json"]));
 
     return {
       ok: true,
-      output: `${stdout}\n${stderr}`.trim(),
+      output: "Daemon stop command sent",
     };
   } catch (error) {
     return {
       ok: false,
-      output: `${error.stdout || ""}\n${error.stderr || ""}\n${error.message || ""}`.trim(),
+      output: "Daemon stop command failed",
       error: "Failed to stop daemon",
     };
+  } finally {
+    releaseDaemonActionLock();
   }
+}
+
+// Circuit breaker for paseo daemon CLI calls
+class CircuitBreaker {
+  constructor(options = {}) {
+    this.failureThreshold = options.failureThreshold || 5;
+    this.resetTimeoutMs = options.resetTimeoutMs || 30000;
+    this.state = "CLOSED";
+    this.failureCount = 0;
+    this.nextAttemptAt = null;
+    this.lastError = null;
+  }
+
+  async call(fn) {
+    if (this.state === "OPEN") {
+      if (Date.now() >= this.nextAttemptAt) {
+        this.state = "HALF_OPEN";
+      } else {
+        const err = this.lastError || new Error("Daemon CLI circuit breaker is OPEN");
+        err.circuitBreaker = true;
+        throw err;
+      }
+    }
+
+    try {
+      const result = await fn();
+      this.onSuccess();
+      return result;
+    } catch (error) {
+      this.onFailure(error);
+      throw error;
+    }
+  }
+
+  onSuccess() {
+    this.failureCount = 0;
+    this.state = "CLOSED";
+    this.lastError = null;
+    this.nextAttemptAt = null;
+  }
+
+  onFailure(error) {
+    this.failureCount += 1;
+    this.lastError = error;
+
+    if (this.state === "HALF_OPEN" || this.failureCount >= this.failureThreshold) {
+      this.state = "OPEN";
+      this.nextAttemptAt = Date.now() + this.resetTimeoutMs;
+      console.error(
+        `[CircuitBreaker] Opened circuit after ${this.failureCount} failures, will retry in ${this.resetTimeoutMs}ms`,
+      );
+    }
+  }
+
+  getState() {
+    return {
+      state: this.state,
+      failureCount: this.failureCount,
+      nextAttemptAt: this.nextAttemptAt,
+    };
+  }
+}
+
+const daemonCircuitBreaker = new CircuitBreaker();
+
+async function callDaemonCli(fn) {
+  return daemonCircuitBreaker.call(fn);
+}
+
+function isDaemonActionInProgress() {
+  return daemonActionInProgress;
+}
+
+function resetDaemonActionLock() {
+  daemonActionInProgress = false;
+  daemonActionLock = null;
 }
 
 module.exports = {
   getDaemonStatus,
   restartDaemon,
   stopDaemon,
+  isDaemonActionInProgress,
+  resetDaemonActionLock,
 };

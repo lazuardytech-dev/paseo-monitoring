@@ -1,5 +1,10 @@
 node_modules
 dist
 .env
+.env.production
 .DS_Store
 bun-debug.log*
+logs/
+*.log
+data/
+!/.env.example
