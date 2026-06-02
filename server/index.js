@@ -45,6 +45,7 @@ const app = express();
 const host = process.env.HOST || "127.0.0.1";
 const port = Number(process.env.PORT || 6004);
 const publicDir = path.join(__dirname, "..", "dist");
+const collectorUrl = process.env.COLLECTOR_URL ? process.env.COLLECTOR_URL.replace(/\/+$/, "") : "";
 const DAEMON_STREAM_INTERVAL_MS = 6000;
 const DAEMON_STREAM_HEARTBEAT_MS = process.env.NODE_ENV === "test" ? 1000 : 15000;
 const daemonStreamClients = new Set();
@@ -56,6 +57,55 @@ let daemonStreamFetchPromise = null;
 // Collector child process (P1-1: fork via IPC)
 let collectorChild = null;
 let collectorLatestState = null;
+
+async function fetchCollectorState() {
+  if (!collectorUrl) {
+    return null;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+
+  try {
+    const response = await fetch(`${collectorUrl}/internal/state`, {
+      signal: controller.signal,
+      headers: {
+        Accept: "application/json",
+      },
+    });
+
+    if (!response.ok) {
+      console.warn(`[collector] ${collectorUrl}/internal/state returned ${response.status}`);
+      return null;
+    }
+
+    const state = await response.json();
+    if (!state?.daemon || !state?.at) {
+      return null;
+    }
+
+    collectorLatestState = state;
+    try {
+      const d = state.daemon;
+      insertSample({
+        cpu: d.metrics?.cpuPercent,
+        ramMb: d.metrics?.memoryMb,
+        daemonStatus: d.ok ? "ok" : "error",
+        localDaemon: d.status?.localDaemon,
+        connectedDaemon: d.status?.connectedDaemon,
+      });
+    } catch (err) {
+      console.error(`[collector] Failed to insert metrics sample: ${err.message}`);
+    }
+
+    return state;
+  } catch (err) {
+    console.warn(`[collector] Failed to fetch state from ${collectorUrl}: ${err.message}`);
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 app.disable("x-powered-by");
 app.set("trust proxy", 1);
@@ -285,7 +335,14 @@ async function fetchAndBroadcastDaemonStreamSnapshot() {
     return;
   }
 
-  // 2. Fallback to state file (cache for restart survival)
+  // 2. Remote collector service (Zeabur/private network)
+  const remoteState = await fetchCollectorState();
+  if (remoteState) {
+    broadcastDaemonStreamSnapshot(remoteState);
+    return;
+  }
+
+  // 3. Fallback to state file (cache for restart survival)
   const cached = await readState();
   if (cached) {
     broadcastDaemonStreamSnapshot(cached);
@@ -308,7 +365,7 @@ async function fetchAndBroadcastDaemonStreamSnapshot() {
     return;
   }
 
-  // 3. Last resort: direct daemon CLI call (cold start, no collector yet)
+  // 4. Last resort: direct daemon CLI call (cold start, no collector yet)
   if (daemonStreamFetchPromise) {
     await daemonStreamFetchPromise;
     return;
@@ -456,9 +513,17 @@ app.get("/api/daemon/status", requireAuth, async (req, res) => {
     return;
   }
 
-  // 2. State file fallback
+  // 2. Remote collector service (Zeabur/private network)
+  const remoteState = await fetchCollectorState();
+  if (remoteState?.daemon) {
+    console.log(`[${req.id}] GET /api/daemon/status 200 (collector url)`);
+    res.json(remoteState.daemon);
+    return;
+  }
+
+  // 3. State file fallback
   const cached = await readState();
-  if (cached && cached.daemon) {
+  if (cached?.daemon) {
     console.log(`[${req.id}] GET /api/daemon/status 200 (file cache)`);
     res.json(cached.daemon);
     return;
@@ -647,6 +712,11 @@ app.use((_req, res) => {
 });
 
 function forkCollector() {
+  if (collectorUrl || process.env.DISABLE_EMBEDDED_COLLECTOR === "true") {
+    console.log("[Startup] Embedded collector disabled");
+    return;
+  }
+
   // In PM2 cluster mode, only fork from the primary instance (pm_id=0)
   const pmId = process.env.pm_id;
   if (pmId !== undefined && pmId !== "0") {

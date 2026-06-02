@@ -1,12 +1,16 @@
-const fs = require("node:fs");
 const fsPromises = require("node:fs/promises");
 const path = require("node:path");
+const express = require("express");
 const { getDaemonStatus } = require("./paseo");
 const { writeState } = require("./state-store");
 
 const COLLECT_INTERVAL_MS = 5000;
 const LOG_DIR = path.join(__dirname, "..", "data");
 const LOG_RETENTION_MS = 48 * 60 * 60 * 1000;
+const host = process.env.HOST || "127.0.0.1";
+const port = Number(process.env.PORT || 6005);
+let latestState = null;
+let server = null;
 
 function getLogFilePath() {
   const date = new Date().toISOString().slice(0, 10);
@@ -65,11 +69,13 @@ async function rotateOldLogs() {
 
 async function collectAndStore() {
   const status = await getDaemonStatus();
-  await writeState({
+  latestState = {
     ok: status.ok,
     daemon: status,
     at: new Date().toISOString(),
-  });
+  };
+
+  await writeState(latestState);
 
   const logEntry = formatLogEntry(status);
   process.stderr.write(logEntry);
@@ -79,9 +85,7 @@ async function collectAndStore() {
     process.send({
       type: "collector:tick",
       data: {
-        ok: status.ok,
-        daemon: status,
-        at: new Date().toISOString(),
+        ...latestState,
       },
     });
   }
@@ -89,6 +93,10 @@ async function collectAndStore() {
 
 function shutdown() {
   console.error("[collector] Shutting down gracefully");
+  if (server) {
+    server.close(() => process.exit(0));
+    return;
+  }
   process.exit(0);
 }
 
@@ -106,6 +114,30 @@ async function main() {
   rotateOldLogs();
 
   console.error(`[collector] Started (interval=${COLLECT_INTERVAL_MS}ms, log_dir=${LOG_DIR})`);
+
+  const app = express();
+  app.disable("x-powered-by");
+  app.get("/internal/state", (_req, res) => {
+    if (!latestState) {
+      res.status(503).json({ ok: false, message: "state unavailable" });
+      return;
+    }
+
+    res.json(latestState);
+  });
+  app.get("/api/health", (_req, res) => {
+    res.json({
+      ok: true,
+      uptime: process.uptime(),
+      pid: process.pid,
+      hasState: Boolean(latestState),
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  server = app.listen(port, host, () => {
+    console.error(`[collector] HTTP listening on http://${host}:${port}`);
+  });
 
   const loop = async () => {
     await collectAndStore();
