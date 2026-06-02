@@ -92,6 +92,10 @@ describe("Accessibility — ARIA Live Regions", () => {
       expect(screen.getByText("Daemon Dashboard")).toBeInTheDocument();
     });
 
+    await waitFor(() => {
+      expect(mockEventSource?.listeners?.status?.length || 0).toBeGreaterThan(0);
+    });
+
     // Trigger SSE error to show error banner
     if (mockEventSource) {
       mockEventSource.triggerError();

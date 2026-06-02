@@ -7,7 +7,7 @@ module.exports = {
     {
       name: "paseo-monitoring",
       script: "./server/index.js",
-      interpreter: "/root/.bun/bin/bun",
+      interpreter: "/usr/local/bin/bun",
       instances: 4,
       exec_mode: "cluster",
       env: {
